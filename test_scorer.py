@@ -151,6 +151,69 @@ def test_perfect_prediction_is_fully_accepted():
     assert np.allclose(r2, 1.0)
 
 
+def test_calibration_respects_minimum_coverage():
+    _, Y = sc.sample_dataset(200, seed=38)
+    rng = np.random.default_rng(1)
+    Yhat = Y + rng.normal(0.0, 5.0 * Y.std(axis=0), Y.shape)
+    Yhat[:3] = Y[:3]
+    trust = np.zeros_like(Y)
+    trust[:3] = 1.0
+    var = Y.var(axis=0)
+    thr = sc.calibrate_threshold(Y, Yhat, trust, var)
+    cov, _ = sc.apply_threshold(Y, Yhat, trust, var, thr)
+    assert (cov == 0).all()
+
+
+# =============================================================
+# axis 1: exact recall of measured points
+# =============================================================
+def test_kinterp_passes_through_training_points():
+    X, Y = sc.sample_dataset(300, seed=31)
+    yhat = sc.Surrogate("kinterp").fit(X, Y).predict(X)
+    assert np.abs(Y - yhat).max() < 1e-6
+
+
+def test_lookup_returns_measured_value_over_model():
+    X, Y = sc.sample_dataset(50, seed=32)
+    lookup = sc.build_lookup(X, Y)
+    wrong = np.zeros_like(Y)
+    out, _, known = sc.simulate(X, wrong, np.zeros_like(Y), np.zeros(sc.N_OUT), lookup, (0, 70))
+    assert known.all()
+    assert np.array_equal(out, Y)
+
+
+def test_lookup_misses_unseen_point():
+    X, Y = sc.sample_dataset(50, seed=33)
+    Xq, _ = sc.sample_dataset(10, seed=34)
+    model = np.zeros((10, sc.N_OUT))
+    out, _, known = sc.simulate(
+        Xq, model, np.zeros_like(model), np.zeros(sc.N_OUT), sc.build_lookup(X, Y), (0, 70)
+    )
+    assert not known.any()
+    assert np.array_equal(out, model)
+
+
+def test_known_point_accepted_despite_hopeless_trust():
+    X, Y = sc.sample_dataset(30, seed=36)
+    trust = np.full((30, sc.N_OUT), -1e9)
+    _, accept, _ = sc.simulate(
+        X, Y.copy(), trust, np.zeros(sc.N_OUT), sc.build_lookup(X, Y), (0, 0)
+    )
+    assert accept.all()
+
+
+def test_popcount_guard_rejects_out_of_range():
+    Xq, _ = sc.sample_dataset(20, seed=35)
+    model = np.zeros((20, sc.N_OUT))
+    _, accept, _ = sc.simulate(Xq, model, np.zeros_like(model), np.zeros(sc.N_OUT), {}, (60, 70))
+    assert not accept.any()
+
+
+def test_score_exactness_zero_for_identical():
+    _, Y = sc.sample_dataset(20, seed=37)
+    assert np.allclose(sc.score_exactness(Y, Y.copy()), 0.0)
+
+
 def test_useless_prediction_is_fully_rejected():
     _, Y = sc.sample_dataset(200, seed=25)
     rng = np.random.default_rng(0)

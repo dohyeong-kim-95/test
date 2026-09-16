@@ -4,8 +4,9 @@ X: (N, 70) binary  ->  Y: (N, 6) scalars
 
 1) deterministic ground truth with many non-differentiable points
 2) random sampling of a 7000-point training set
-3) three surrogates built from those 7000 points
-4) risk-coverage scoring with a calibrated "data lack" rejection path
+3) four surrogates built from those 7000 points
+4) two scoring axes: exact recall of measured points, and interpolation quality
+   away from them, the latter with a calibrated "data lack" rejection path
 """
 
 import numpy as np
@@ -20,7 +21,9 @@ TEST_SEED = 2
 N_ENSEMBLE = 5
 SUBSAMPLE = 0.8
 TARGET_R2 = 0.5
-METHODS = ("idw", "expknn", "bitint")
+MIN_COVERAGE = 0.05
+METHODS = ("idw", "expknn", "bitint", "kinterp")
+DEFAULT_TAU = {"idw": 3.0, "expknn": 3.0, "bitint": 3.0, "kinterp": 20.0}
 
 
 # =============================================================
@@ -98,22 +101,26 @@ def bit_features(X):
 # surrogate
 # =============================================================
 class Surrogate:
-    def __init__(self, method, k=48, tau=3.0, ridge=30.0):
+    def __init__(self, method, k=48, tau=None, ridge=30.0):
         if method not in METHODS:
             raise ValueError(f"unknown method: {method}")
         self.method = method
         self.k = k
-        self.tau = tau
+        self.tau = DEFAULT_TAU[method] if tau is None else tau
         self.ridge = ridge
 
     def fit(self, X, Y):
         self.X = np.asarray(X, dtype=np.int8)
         self.Y = np.asarray(Y, dtype=np.float64)
+        self.y_mean = self.Y.mean(axis=0)
         if self.method == "bitint":
             F = bit_features(self.X)
             gram = (F.T @ F).astype(np.float64)
             gram[np.diag_indices_from(gram)] += self.ridge
             self.coef = np.linalg.solve(gram, F.T.astype(np.float64) @ self.Y)
+        elif self.method == "kinterp":
+            K = np.exp(-hamming_matrix(self.X, self.X).astype(np.float64) / self.tau)
+            self.alpha = np.linalg.solve(K, self.Y - self.y_mean)
         return self
 
     def neighbors(self, Xq):
@@ -124,6 +131,9 @@ class Surrogate:
     def predict(self, Xq):
         if self.method == "bitint":
             return bit_features(Xq) @ self.coef
+        if self.method == "kinterp":
+            Kq = np.exp(-hamming_matrix(Xq, self.X).astype(np.float64) / self.tau)
+            return Kq @ self.alpha + self.y_mean
         idx, d = self.neighbors(Xq)
         if self.method == "idw":
             w = 1.0 / (d + 0.5)
@@ -186,6 +196,7 @@ def calibrate_threshold(Y, Yhat, trust, ref_var, target_r2=TARGET_R2):
         err2 = (Y[order, j] - Yhat[order, j]) ** 2
         running_r2 = 1.0 - np.cumsum(err2) / (np.arange(1, n + 1) * ref_var[j])
         ok = np.flatnonzero(running_r2 >= target_r2)
+        ok = ok[ok >= max(1, int(MIN_COVERAGE * n)) - 1]
         if ok.size > 0:
             thresholds[j] = trust[order[ok[-1]], j]
     return thresholds
@@ -201,6 +212,39 @@ def apply_threshold(Y, Yhat, trust, ref_var, thresholds):
             err = Y[take, j] - Yhat[take, j]
             r2[j] = 1.0 - (err**2).mean() / ref_var[j]
     return coverage, r2
+
+
+# =============================================================
+# exact recall of measured points
+# =============================================================
+def build_lookup(X, Y):
+    return {row.tobytes(): Y[i] for i, row in enumerate(np.asarray(X, dtype=np.int8))}
+
+
+# =============================================================
+# simulator: measured value if known, else model, plus accept mask
+# =============================================================
+def simulate(Xq, Y_model, trust, thresholds, lookup, pop_range):
+    Xq = np.asarray(Xq, dtype=np.int8)
+    out = Y_model.copy()
+    known = np.zeros(Xq.shape[0], dtype=bool)
+    for i in range(Xq.shape[0]):
+        hit = lookup.get(Xq[i].tobytes())
+        if hit is not None:
+            out[i] = hit
+            known[i] = True
+    pop = Xq.sum(axis=1)
+    in_range = (pop >= pop_range[0]) & (pop <= pop_range[1])
+    accept = (trust >= thresholds) & in_range[:, None]
+    accept[known] = True
+    return out, accept, known
+
+
+# =============================================================
+# axis 1: does a measured point come back exactly?
+# =============================================================
+def score_exactness(Y_true, Y_sim):
+    return np.abs(Y_true - Y_sim).max(axis=0)
 
 
 # =============================================================
@@ -222,15 +266,31 @@ def main():
     bn, br = score_columns(Yte[half:], base, ref_var)
     print(f"\nbaseline (train mean)   nMAE {bn.mean():.3f}   R2 {br.mean():+.3f}")
 
+    lookup = build_lookup(Xtr, Ytr)
+    pop_range = (Xtr.sum(1).min(), Xtr.sum(1).max())
+    probe = Xtr[:500]
     levels = [1.0, 0.8, 0.5, 0.2, 0.05]
+
     for method in METHODS:
+        model = Surrogate(method).fit(Xtr, Ytr)
         yhat, spread = ensemble_predict(method, Xtr, Ytr, Xte)
         trust = -spread / np.sqrt(ref_var)
         nmae, r2 = score_columns(Yte[half:], yhat[half:], ref_var)
 
         print(f"\n=== {method} ===")
-        print("per-output nMAE " + "  ".join(f"y{i} {nmae[i]:.3f}" for i in range(N_OUT)))
-        print("per-output R2   " + "  ".join(f"y{i} {r2[i]:+.3f}" for i in range(N_OUT)))
+
+        raw = score_exactness(Ytr[:500], model.predict(probe))
+        sim, _, known = simulate(
+            probe, model.predict(probe), np.zeros((500, N_OUT)), np.zeros(N_OUT), lookup, pop_range
+        )
+        print("axis1 exactness  model " + " ".join(f"{v:.1e}" for v in raw))
+        print(
+            f"                 sim   {score_exactness(Ytr[:500], sim).max():.1e} "
+            f"(hit {known.sum()}/500)"
+        )
+
+        print("axis2 nMAE      " + "  ".join(f"y{i} {nmae[i]:.3f}" for i in range(N_OUT)))
+        print("axis2 R2        " + "  ".join(f"y{i} {r2[i]:+.3f}" for i in range(N_OUT)))
 
         print("coverage (R2)  " + " ".join(f"{'y' + str(i):>6}" for i in range(N_OUT)))
         for cov, _, rr in risk_coverage(Yte[half:], yhat[half:], trust[half:], ref_var, levels):
