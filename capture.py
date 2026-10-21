@@ -42,6 +42,12 @@ class Camera:
         resp.raise_for_status()
         return cv2.imdecode(np.frombuffer(resp.content, np.uint8), cv2.IMREAD_COLOR)
 
+    def photo(self, url):
+        """고화질 사진 원본(JPEG 바이트)을 받는다. IP Webcam의 /photo.jpg."""
+        resp = requests.get(url, auth=self.auth, timeout=15)
+        resp.raise_for_status()
+        return resp.content
+
 
 class Trigger:
     """전신이 hold_sec 이상 이어지면 촬영, 촬영 후 cooldown_sec 동안은 쉰다."""
@@ -95,13 +101,23 @@ def ootd_date(dt, day_start_hour):
     return (dt - timedelta(hours=day_start_hour)).date()
 
 
-def save_photo(frame, photo_dir, day_start_hour):
+def save_photo(jpeg_bytes, photo_dir, day_start_hour):
     now = datetime.now()
     folder = Path(photo_dir) / ootd_date(now, day_start_hour).isoformat()
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{now:%H%M%S}.jpg"
-    cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    path.write_bytes(jpeg_bytes)
     return path
+
+
+def take_photo(camera, frame, photo_url):
+    """photo_url이 있으면 고화질 원본을, 없거나 실패하면 감지에 쓴 프레임을 저장용 JPEG로 만든다."""
+    if photo_url:
+        try:
+            return camera.photo(photo_url)
+        except Exception as e:
+            print("고화질 촬영 실패, 감지 프레임으로 저장:", e)
+    return cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])[1].tobytes()
 
 
 def run(cfg):
@@ -117,5 +133,6 @@ def run(cfg):
             time.sleep(5)
             continue
         if frame is not None and trigger.update(is_full_body(detector, frame), time.monotonic()):
-            print("촬영:", save_photo(frame, cfg["photo_dir"], cfg["day_start_hour"]))
+            jpeg = take_photo(camera, frame, cfg.get("photo_url", ""))
+            print("촬영:", save_photo(jpeg, cfg["photo_dir"], cfg["day_start_hour"]))
         time.sleep(cfg["check_interval_sec"])
