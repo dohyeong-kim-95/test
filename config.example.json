@@ -1,0 +1,11 @@
+{
+  "camera_url": "http://192.168.0.10:8080/shot.jpg",
+  "camera_user": "",
+  "camera_password": "",
+  "photo_dir": "photos",
+  "check_interval_sec": 1.0,
+  "hold_sec": 2.0,
+  "cooldown_min": 30,
+  "day_start_hour": 4,
+  "port": 5000
+}
