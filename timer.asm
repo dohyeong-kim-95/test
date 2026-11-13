@@ -58,7 +58,7 @@ tmpl:
 ; ---------------- code ----------------
 %define I(x) [ebx + x - BUF]
 init:                            ; eax = 0
-    push eax                     ; SetTimer: no callback
+    push proc                    ; SetTimer callback = proc, so WM_TIMER's lParam is the tick count
     push 100
     push ebp                     ; id (any nonzero)
     push ebp
@@ -96,9 +96,11 @@ proc:
     dec eax
     dec eax                      ; WM_TIMER
     jnz done
-    cmp I(RUN), al
+    lodsd
+    lodsd                        ; lParam = tick count (we are the TIMERPROC)
+    mov I(NOW), eax
+    cmp byte I(RUN), 0
     je done
-    call I(GetTickCount)
     sub eax, I(V)                ; up: elapsed ms; down: -(remaining ms)
     cmp byte I(MODE), 1
     jne show
@@ -179,7 +181,7 @@ command:
 .set:
     mov I(V), eax                ; as if paused at this elapsed value
 pause:                           ; V = now - V toggles start-time <-> elapsed
-    call I(GetTickCount)
+    mov eax, I(NOW)              ; tick of the last WM_TIMER (<= 100 ms old)
     sub eax, I(V)
     mov I(V), eax
     not byte I(RUN)
@@ -204,7 +206,6 @@ n_g32: db 'gdi32.dll',0
 h_%1 equ $ - 2
     db %str(%1), 0
 %endmacro
-    hn GetTickCount
     hn CreateFontA
     hn wsprintfA
     hn DialogBoxIndirectParamW
@@ -216,7 +217,6 @@ BUF equ $                        ; ebx points here; reused as text buffer after 
 %1: dd h_%1 - B
 %endmacro
 iat_k32:
-    imp GetTickCount
     imp ExitProcess
     dd 0
 iat_g32:
@@ -236,5 +236,7 @@ idt:
 V:      dd 0                     ; running: start tick (down: end tick); paused: elapsed (down: -remaining)
 MODE:   db 0                     ; 1 = countdown
 RUN:    db 0
-        times 10 db 0
+        dw 0
+NOW:    dd 0                     ; last tick count seen
+        times 8 db 0
 end:
