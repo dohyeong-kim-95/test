@@ -1,29 +1,142 @@
 # Tiny Timer
 
-A Windows timer that is always on top and counts down or up. It is a single standalone `timer.exe` of **856 bytes**.
+항상 다른 창 위에 떠 있는 Windows용 카운트다운 / 카운트업 타이머입니다.
+설치 없이 실행되는 단일 파일 `timer.exe`이고, 크기는 **832바이트**입니다.
 
-## Usage
-- Type a time in the input box (default `5`): `5` = 5 min, `5:30` = 5 min 30 s, `1:00:00` = 1 h
-- `▼` (or Enter): count down. When it reaches 0 it beeps and stops.
-- `▲`: count up from 0
-- `║`: pause / resume
-- Esc or the X button: quit
-- The window always stays on top.
+> 주의: 개발 중 동작 확인은 Linux의 wine에서만 했습니다. 실제 Windows에서는 아직 검증하지 못했습니다.
 
-## How the size is reduced
-- The whole thing is written in hand-coded x86 assembly (`timer.asm`, nasm `-f bin`). No linker, no C runtime.
-- The UI is an in-memory dialog template, so there is no window class or message loop.
-- PE header and import table are written by hand: 1 section, 4-byte alignment, headers overlapped (e_lfanew=4).
-- DLL and function name strings are stored in unused PE header fields. Import hints overlap the end of the previous string.
-- The trailing state variables (zero at load) double as the import descriptor terminator.
-- An import name string that is no longer needed after load is reused as the text buffer.
-- Only one user32 messaging import: `SendDlgItemMessageA` does WM_SETFONT / WM_SETTEXT / WM_GETTEXT.
-- Closing calls `ExitProcess` straight from the dialog procedure (no `EndDialog`).
-- IAT and state are addressed from a base register (`[ebx+disp8]`) to shorten instructions.
-- Pause/resume is a single expression: `V = now - V` (start time <-> elapsed time).
+## 실행
 
-## Build
-Requires `nasm`.
+1. `timer.exe`를 받아 아무 폴더에나 둡니다.
+2. 더블클릭하면 화면 가운데에 작은 창이 뜹니다.
+
+- 설치, 관리자 권한, 추가 파일이 필요 없습니다.
+- 설정 파일이나 레지스트리를 만들지 않습니다. 지울 때는 `timer.exe`만 삭제하면 됩니다.
+- 32비트 프로그램이며 64비트 Windows에서도 실행됩니다.
+- 여러 개를 동시에 띄울 수 있습니다. 각 창은 서로 독립된 타이머입니다.
+
+## 화면 구성
+
 ```
+┌─ T ───────────────── _ X ┐
+│        00:05:00          │   ← 시간 표시 (시:분:초)
+│ [ 5  ]  [ ▼ ] [ ▲ ] [ ║ ]│
+└──────────────────────────┘
+   입력칸   다운  업   일시정지
+```
+
+| 요소 | 역할 |
+|---|---|
+| 시간 표시 | 남은 시간(카운트다운) 또는 지난 시간(카운트업) |
+| 입력칸 | 카운트다운할 시간. 처음 값은 `5`(5분) |
+| `▼` | 입력칸의 시간부터 카운트다운 시작 |
+| `▲` | 0부터 카운트업 시작 (스톱워치) |
+| `║` | 일시정지 / 재개 |
+
+창은 항상 다른 창들 위에 표시됩니다. 이 동작은 끌 수 없습니다.
+작업표시줄과 Alt+Tab에는 `T`라는 이름으로 나타납니다.
+
+## 시간 입력 형식
+
+숫자와 `:`만 씁니다. `:`가 없으면 **분**으로 해석합니다.
+
+| 입력 | 의미 |
+|---|---|
+| `5` | 5분 |
+| `90` | 90분 (표시는 `01:30:00`) |
+| `5:30` | 5분 30초 |
+| `0:10` | 10초 |
+| `0:90` | 90초 (표시는 `00:01:30`) |
+| `1:00:00` | 1시간 |
+| `2:15:00` | 2시간 15분 |
+
+- 입력은 최대 8글자까지 읽습니다. 그보다 길면 뒷부분이 잘립니다.
+- 각 자리 숫자는 60을 넘어도 됩니다 (`90`, `0:90` 등).
+- 숫자나 `:`가 아닌 글자를 넣으면 결과가 엉뚱해질 수 있습니다.
+
+## 사용법
+
+### 카운트다운
+
+1. 입력칸에 시간을 넣습니다.
+2. `▼`를 누르거나 **Enter**를 칩니다.
+3. 남은 시간이 줄어들다가 0이 되면 `00:00:00`에서 멈추고 Windows 알림음이 한 번 울립니다.
+
+- 진행 중에 `▼`를 다시 누르면 입력칸의 시간으로 처음부터 다시 시작합니다.
+- 입력칸이 비어 있거나 `0`이면 바로 알림음이 울리고 끝납니다.
+- 알림음은 Windows 시스템 소리입니다. 시스템 소리를 꺼 두었거나 음소거 상태면 들리지 않습니다.
+
+### 카운트업 (스톱워치)
+
+1. `▲`를 누릅니다.
+2. `00:00:00`부터 계속 올라갑니다. 입력칸의 값은 쓰지 않고, 자동으로 멈추지도 않습니다.
+
+- 진행 중에 `▲`를 다시 누르면 0부터 다시 시작합니다.
+
+### 일시정지 / 재개
+
+- 진행 중에 `║`를 누르면 멈추고, 다시 누르면 멈춘 자리에서 이어집니다.
+- 카운트다운과 카운트업 모두에서 동작합니다.
+- 타이머가 돌고 있지 않을 때(처음 실행 직후, 카운트다운 종료 후)는 눌러도 아무 일도 일어나지 않습니다.
+
+### 종료
+
+- 창의 **X** 버튼을 누르거나 **Esc**를 칩니다.
+
+## 키보드 조작
+
+| 키 | 동작 |
+|---|---|
+| Enter | 카운트다운 시작 (`▼`와 같음) |
+| Esc | 종료 |
+| Tab / Shift+Tab | 입력칸과 버튼 사이로 포커스 이동 |
+| Space | 포커스가 있는 버튼 누르기 |
+
+실행 직후에는 입력칸에 포커스가 있고 내용이 선택되어 있어서, 바로 숫자를 치고 Enter를 누르면 됩니다.
+
+## 알아둘 점
+
+- **정확도**: Windows의 시스템 시계를 기준으로 계산하므로 오래 켜 두어도 시간이 밀리지 않습니다.
+- **반응 간격**: 화면은 0.1초마다 갱신됩니다. 시작·일시정지·재개 시점도 최대 0.1초 늦게 잡힙니다.
+- **표시 한계**: 시간 표시는 `59:59:59`까지만 정상입니다. 60시간이 넘으면 시 자리가 0부터 다시 돌아갑니다(시간 계산 자체는 계속 맞습니다).
+- **카운트다운 한계**: 약 596시간(약 24일)을 넘는 값은 제대로 동작하지 않습니다.
+- **백신**: 파일을 극단적으로 작게 만들기 위해 일반적이지 않은 구조를 쓰기 때문에, 백신이 의심 파일로 판단할 수 있습니다.
+- **고해상도 화면**: 배율 설정에 따라 창이 흐릿하게 보일 수 있습니다.
+
+## 직접 빌드하기
+
+`nasm`만 있으면 됩니다. 링커나 C 컴파일러는 필요 없습니다.
+
+```bash
 ./build.sh
 ```
+
+`build.sh`는 아래 한 줄을 실행하고 결과 크기를 출력합니다.
+
+```bash
+nasm -f bin timer.asm -o timer.exe
+```
+
+## 파일
+
+| 파일 | 내용 |
+|---|---|
+| `timer.exe` | 완성된 실행 파일 |
+| `timer.asm` | 소스 전체 (PE 헤더, 화면 구성, 코드, import 테이블) |
+| `build.sh` | 빌드 스크립트 |
+
+## 크기를 줄인 방법
+
+- 전체를 x86 어셈블리로 직접 작성했습니다. C 런타임과 링커를 쓰지 않습니다.
+- 화면은 메모리에 넣어 둔 대화상자 템플릿으로 만듭니다. 창 클래스 등록과 메시지 루프가 없습니다.
+- PE 헤더와 import 테이블을 손으로 작성했습니다. 섹션 1개, 4바이트 정렬, DOS 헤더와 PE 헤더 겹치기를 씁니다.
+- DLL 이름과 함수 이름 문자열을 PE 헤더의 안 쓰는 칸에 넣었습니다.
+- import 힌트 2바이트는 앞 문자열의 끝부분과 겹칩니다.
+- 실행 중 상태 변수(시작 시 0)가 import 테이블의 종료 표시를 겸합니다.
+- 로드가 끝나면 필요 없는 `gdi32.dll` 이름 문자열 자리를 글자 버퍼로 다시 씁니다.
+- 글자 읽기·쓰기·글꼴 지정을 `SendDlgItemMessageA` 하나로 처리합니다.
+- 시각은 `GetTickCount` 대신 타이머 콜백이 넘겨받는 값을 씁니다.
+- 닫을 때는 대화상자 처리 함수 안에서 바로 `ExitProcess`를 부릅니다.
+- `hh:mm:ss` 문자열은 `wsprintf` 없이 직접 만듭니다.
+- 일시정지와 재개는 식 하나(`V = 현재 - V`)로 처리하고, 시작도 같은 코드를 공유합니다.
+- 버튼 글자는 한 글자짜리 유니코드 기호입니다.

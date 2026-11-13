@@ -56,7 +56,7 @@ tmpl:
     item 0x00010000,94, 25,  30, 12,  4, 0x80, 0x2551
 
 ; ---------------- code ----------------
-%define I(x) [ebx + x - BUF]
+%define I(x) [ebx + x - BUF]     ; IAT slot / state via base register
 init:                            ; eax = 0
     push proc                    ; SetTimer callback = proc, so WM_TIMER's lParam is the tick count
     push 100
@@ -99,38 +99,43 @@ proc:
     lodsd
     lodsd                        ; lParam = tick count (we are the TIMERPROC)
     mov I(NOW), eax
-    cmp byte I(RUN), 0
-    je done
     sub eax, I(V)                ; up: elapsed ms; down: -(remaining ms)
-    cmp byte I(MODE), 1
-    jne show
+    mov cl, I(S)                 ; S: -1 down running, -3 up running, 0 stopped, 1/3 paused
+    inc cl
+    jg done                      ; stopped / paused
+    jnz show                     ; up
     neg eax
     jg .left
     push 0x30                    ; MB_ICONEXCLAMATION
     call I(MessageBeep)
 .zero:
     xor eax, eax
-    mov I(RUN), al               ; finished
+    mov I(S), al                 ; finished / stopped
 .left:
     add eax, 999                 ; round up for countdown
 show:                            ; eax = ms -> "h:mm:ss"
     xor edx, edx
     mov ecx, 1000
     div ecx
+    lea edi, [ebx+7]             ; write ":hh:mm:ss" backwards, ending at BUF+7
+    std
     push 60
+    pop esi
+    push 3
     pop ecx
-    cdq
-    div ecx
-    push edx                     ; s
-    cdq
-    div ecx
-    push edx                     ; m
-    push eax                     ; h
-    lea eax, I(fmt)
-    push eax
-    push ebx                     ; BUF
-    call I(wsprintfA)
-    add esp, 20
+.f: cdq
+    div esi
+    xchg eax, edx                ; eax = field (< 60), edx = rest
+    aam                          ; ah = tens, al = ones
+    add ax, '00'
+    stosb
+    mov al, ah
+    stosb
+    mov al, ':'
+    stosb
+    xchg eax, edx
+    loop .f
+    cld
     push ebx
     push eax                     ; wParam unused
     push 0x0C                    ; WM_SETTEXT
@@ -149,11 +154,11 @@ command:
     je pause
     cmp al, 2
     je close
-    mov I(MODE), eax             ; MODE = id, RUN = 0
+    mov I(S), eax                ; S = id: "paused" in that mode
     ja .set                      ; up: start from "elapsed = 3 ms"
     mov esi, ebx                 ; BUF
     push ebx
-    push 16
+    push 9                       ; at most 8 chars, keeps the NUL at BUF+8
     push 0x0D                    ; WM_GETTEXT
     push 11
     push ebp
@@ -184,35 +189,34 @@ pause:                           ; V = now - V toggles start-time <-> elapsed
     mov eax, I(NOW)              ; tick of the last WM_TIMER (<= 100 ms old)
     sub eax, I(V)
     mov I(V), eax
-    not byte I(RUN)
+    neg byte I(S)                ; paused <-> running
     jmp done
 
 entry:
-    mov ebx, BUF
     xor eax, eax
     push eax
     push proc
     push eax
     push tmpl
     push eax
-    call I(DialogBoxIndirectParamW)
+    call [DialogBoxIndirectParamW]   ; never returns: proc exits via ExitProcess
 close:
     call I(ExitProcess)
 
 ; ---------------- imports ----------------
 n_k32: db 'kernel32.dll',0
-n_g32: db 'gdi32.dll',0
 %macro hn 1
 h_%1 equ $ - 2
     db %str(%1), 0
 %endmacro
     hn CreateFontA
-    hn wsprintfA
     hn DialogBoxIndirectParamW
-    times ($$ - $ - 13 - 20) & 3 db 0   ; so that the IAT is dword aligned
-fmt: db '%u:%02u:%02u',0
-BUF equ $                        ; ebx points here; reused as text buffer after load (20 bytes)
     hn SendDlgItemMessageA
+    times ($$ - $ - 10) & 3 db 0 ; so that the IAT is dword aligned
+; "gdi32.dll" is only needed at load time; afterwards its bytes are the text buffer:
+; ebx -> 8 chars + the string's own NUL at BUF+8 (the ':' written at BUF-1 is never shown)
+n_g32: db 'g'
+BUF:   db 'di32.dll',0
 %macro imp 1
 %1: dd h_%1 - B
 %endmacro
@@ -226,7 +230,6 @@ iat_u32:
     imp DialogBoxIndirectParamW
     imp SetTimer
     imp MessageBeep
-    imp wsprintfA
     imp SendDlgItemMessageA      ; list terminated by idt's first dword (0)
 idt:
     dd 0, 0, 0, n_k32 - B, iat_k32 - B
@@ -234,9 +237,7 @@ idt:
     dd 0, 0, 0, n_g32 - B, iat_g32 - B
 ; state: zero at load, so it also serves as the null import descriptor (20 bytes)
 V:      dd 0                     ; running: start tick (down: end tick); paused: elapsed (down: -remaining)
-MODE:   db 0                     ; 1 = countdown
-RUN:    db 0
-        dw 0
+S:      dd 0                     ; state byte (see timer path); upper 3 bytes stay 0
 NOW:    dd 0                     ; last tick count seen
         times 8 db 0
 end:
