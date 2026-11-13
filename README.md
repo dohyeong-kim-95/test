@@ -1,6 +1,6 @@
 # Tiny Timer
 
-A Windows timer that is always on top and counts down or up. It is a single standalone `timer.exe` of **1,032 bytes**.
+A Windows timer that is always on top and counts down or up. It is a single standalone `timer.exe` of **1,024 bytes**.
 
 ## Usage
 - Type a time in the input box: `5` = 5 min, `5:30` = 5 min 30 s, `1:00:00` = 1 h
