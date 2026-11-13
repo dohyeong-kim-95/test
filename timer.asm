@@ -191,7 +191,7 @@ align 4, db 0
 tmpl:
     dd 0x00CA0840, 8             ; CAPTION|SYSMENU|MINIMIZEBOX|DS_SETFONT|DS_CENTER, EX_TOPMOST
     dw 5, 0, 0, 126, 39, 0, 0
-    dw 0, 8, __utf16__('Arial'), 0             ; no title
+    dw 'T', 0, 8, __utf16__('Arial'), 0        ; title "T"
 %macro item 8                    ; style x y cx cy id class text
     align 4, db 0
     dd 0x50000000 | %1, 0
