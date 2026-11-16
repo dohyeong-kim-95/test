@@ -102,19 +102,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("session", type=Path)
     ap.add_argument("-o", "--out", default="context.html")
+    ap.add_argument("-w", "--window", type=int, default=200_000, help="모델 컨텍스트 창 크기 (1M 모델이면 1000000)")
     args = ap.parse_args()
 
     items, total = parse_session(args.session)
-    root = f"{args.session.stem[:8]} (총 {total:,} tokens)"
+    free = args.window - total
+    if free > 0:
+        items.append(("Free space", "남은 공간", free))
+    root = f"{args.session.stem[:8]} — {total:,} / {args.window:,} tokens ({total / args.window:.0%} 사용)"
     fig = px.treemap(
         names=None,
         path=[[root] * len(items), [c for c, _, _ in items], [l for _, l, _ in items]],
         values=[n for _, _, n in items],
     )
-    fig.update_traces(textinfo="label+value+percent root")
+    fig.update_traces(textinfo="label+value+percent root", root_color="lightgrey")
     fig.update_layout(margin=dict(t=30, l=5, r=5, b=5))
     fig.write_html(args.out)
-    print(f"{args.out} 저장 (항목 {len(items)}개, 총 {total:,} tokens)")
+    print(f"{args.out} 저장 ({total:,} / {args.window:,} tokens, {total / args.window:.0%} 사용)")
 
 
 if __name__ == "__main__":
