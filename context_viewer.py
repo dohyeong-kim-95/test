@@ -1,4 +1,9 @@
-"""Claude Code 세션 1개의 컨텍스트 구성을 트리맵(HTML)으로 시각화하는 MVP.
+"""Claude Code 세션 1개의 컨텍스트 구성을 트리맵(HTML)으로 시각화하고,
+클릭으로 고른 항목을 바탕으로 /compact 지시문을 만들어 주는 MVP.
+
+트리맵 조작:
+    - 항목(가장 작은 네모) 클릭: 기본 → 버림 → 남김 → 기본 순으로 바뀜
+    - 카테고리 클릭: 확대 / 상단 경로 클릭: 축소
 
 사용법:
     pip install plotly
@@ -9,6 +14,7 @@ import json
 from pathlib import Path
 
 import plotly.express as px
+import plotly.graph_objects as go
 
 
 def est_tokens(text: str) -> int:
@@ -98,6 +104,85 @@ def parse_session(path: Path):
     return items, total
 
 
+# 압축으로 줄일 수 없는 영역 (클릭 선택 대상에서 제외)
+FIXED = {"System prompt + tools (추정)", "System reminders", "Free space"}
+
+PANEL = """
+<div style="font-family:sans-serif;padding:8px 12px">
+  <div style="margin-bottom:6px">
+    <span style="background:#555;color:#fff;padding:2px 6px">버림</span>
+    <span style="background:#f2c94c;padding:2px 6px">남김</span>
+    항목 클릭으로 선택 · 카테고리 클릭은 확대
+  </div>
+  <textarea id="extra" rows="2" style="width:100%" placeholder="추가 지시 (선택)"></textarea>
+  <textarea id="prompt" rows="5" style="width:100%;margin-top:6px" readonly></textarea>
+  <button id="copy">복사</button> <span id="sum"></span>
+</div>
+<script>
+const gd = document.getElementById("tm");
+const tr = gd.data[0];
+const baseColors = tr.marker.colors.slice(), baseLabels = tr.labels.slice();
+const state = {};  // idx -> "drop" | "keep"
+const NEXT = {undefined: "drop", drop: "keep", keep: undefined};
+
+function render() {
+  const colors = baseColors.slice();
+  const drop = [], keep = [];
+  let dropTok = 0;
+  for (const [i, st] of Object.entries(state)) {
+    const desc = `[${tr.parents[i].split("/").pop()}] ${baseLabels[i]}`;
+    if (st === "drop") { colors[i] = "#555"; drop.push(desc); dropTok += tr.values[i]; }
+    if (st === "keep") { colors[i] = "#f2c94c"; keep.push(desc); }
+  }
+  Plotly.restyle(gd, {"marker.colors": [colors]});
+  const parts = [];
+  if (drop.length) parts.push("요약에서 제외하거나 한 줄로만 언급: " + drop.join("; ") + ".");
+  if (keep.length) parts.push("반드시 자세히 보존: " + keep.join("; ") + ".");
+  const extra = document.getElementById("extra").value.trim();
+  if (extra) parts.push(extra);
+  document.getElementById("prompt").value = parts.length ? "/compact " + parts.join(" ") : "";
+  document.getElementById("sum").textContent = `버림 ${drop.length}개 (~${dropTok.toLocaleString()} tokens) · 남김 ${keep.length}개`;
+}
+
+gd.on("plotly_treemapclick", (e) => {
+  const i = e.points[0].pointNumber;
+  if (!TOGGLABLE.includes(i)) return true;  // 기본 동작(확대/축소)
+  state[i] = NEXT[state[i]];
+  if (!state[i]) delete state[i];
+  render();
+  return false;
+});
+document.getElementById("extra").addEventListener("input", render);
+document.getElementById("copy").onclick = () => navigator.clipboard.writeText(document.getElementById("prompt").value);
+render();
+</script>
+"""
+
+
+def build_figure(items, root):
+    palette = px.colors.qualitative.Set2
+    cats = list(dict.fromkeys(c for c, _, _ in items))
+    cat_color = {c: palette[i % len(palette)] for i, c in enumerate(cats)}
+
+    ids, labels, parents, values, colors = [root], [root], [""], [sum(n for _, _, n in items)], ["lightgrey"]
+    for c in cats:
+        ids.append(f"{root}/{c}"); labels.append(c); parents.append(root)
+        values.append(sum(n for cc, _, n in items if cc == c)); colors.append(cat_color[c])
+    togglable = []
+    for k, (c, label, n) in enumerate(items):
+        if c not in FIXED:
+            togglable.append(len(ids))
+        ids.append(f"{root}/{c}/{k}"); labels.append(label); parents.append(f"{root}/{c}")
+        values.append(n); colors.append(cat_color[c])
+
+    fig = go.Figure(go.Treemap(
+        ids=ids, labels=labels, parents=parents, values=values, branchvalues="total",
+        marker=dict(colors=colors), textinfo="label+value+percent root",
+    ))
+    fig.update_layout(margin=dict(t=30, l=5, r=5, b=5), height=650)
+    return fig, togglable
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("session", type=Path)
@@ -110,14 +195,12 @@ def main():
     if free > 0:
         items.append(("Free space", "남은 공간", free))
     root = f"{args.session.stem[:8]} — {total:,} / {args.window:,} tokens ({total / args.window:.0%} 사용)"
-    fig = px.treemap(
-        names=None,
-        path=[[root] * len(items), [c for c, _, _ in items], [l for _, l, _ in items]],
-        values=[n for _, _, n in items],
-    )
-    fig.update_traces(textinfo="label+value+percent root", root_color="lightgrey")
-    fig.update_layout(margin=dict(t=30, l=5, r=5, b=5))
-    fig.write_html(args.out)
+
+    fig, togglable = build_figure(items, root)
+    plot = fig.to_html(full_html=False, include_plotlyjs=True, div_id="tm")
+    html = (f'<html><head><meta charset="utf-8"><title>Context Viewer</title></head><body>'
+            f'{plot}<script>const TOGGLABLE = {json.dumps(togglable)};</script>{PANEL}</body></html>')
+    Path(args.out).write_text(html, encoding="utf-8")
     print(f"{args.out} 저장 ({total:,} / {args.window:,} tokens, {total / args.window:.0%} 사용)")
 
 
